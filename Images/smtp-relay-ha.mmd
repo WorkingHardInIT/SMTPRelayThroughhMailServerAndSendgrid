@@ -1,0 +1,51 @@
+flowchart LR
+    %% Styling
+    classDef nonAuth stroke:#e74c3c,stroke-width:2px,color:#fff
+    classDef auth stroke:#3498db,stroke-width:2px,color:#fff
+
+    %% Top Left: Non-Authenticated Devices
+    subgraph NonAuthGroup["Non-Authenticated Devices"]
+        direction TB
+        NA_Switch["Enterprise Switch"]
+        NA_DRAC["DRAC"]
+        NA_WAP["WAP Controller"]
+    end
+
+    %% Bottom Left: Authenticated Devices
+    subgraph AuthGroup["Authenticated Devices"]
+        direction TB
+        A_Switch["Enterprise Switch"]
+        A_DRAC["DRAC"]
+        A_WAP["WAP Controller"]
+    end
+
+    %% Load Balancer
+    subgraph KempHA["Kemp LoadMaster HA<br/>(smtp.workinghardinit.work)"]
+        Kemp1["LoadMaster Node 1"]
+        Kemp2["LoadMaster Node 2"]
+    end
+
+    %% SMTP Relays
+    SMTP01["hMailServer<br/>(smtp01.workinghardinit.work)"]
+    SMTP02["hMailServer<br/>(smtp02.workinghardinit.work)"]
+
+    %% External Relay
+    SendGrid(["SendGrid"])
+
+    %% Non-Authenticated Path (Red)
+    NonAuthGroup -->|"🔓 TCP 25, no TLS/AUTH"| KempHA
+    KempHA -->|"🔓"| SMTP01
+    KempHA -->|"🔓"| SMTP02
+
+    %% Authenticated Path (Blue)
+    AuthGroup -->|"🔒 TCP 587, STARTTLS"| KempHA
+    KempHA -->|"🔒"| SMTP01
+    KempHA -->|"🔒"| SMTP02
+
+    %% Outbound to SendGrid
+    SMTP01 -->|"🔒 STARTTLS + API key"| SendGrid
+    SMTP02 -->|"🔒 STARTTLS + API key"| SendGrid
+
+    %% Link Styling (Red for Non-Auth, Blue for Auth/Outbound)
+    linkStyle 0,1,2 stroke:#e74c3c,stroke-width:2px
+    linkStyle 3,4,5,6,7 stroke:#3498db,stroke-width:2px
