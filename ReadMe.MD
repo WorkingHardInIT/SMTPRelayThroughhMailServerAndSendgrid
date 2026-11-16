@@ -1,5 +1,7 @@
 # Device SMTP relay through hMailServer and SendGrid
 
+## Introduction
+
 This project configures a Windows SMTP relay for infrastructure devices that
 cannot conveniently authenticate via modern auth to an external mail provider.
 This **SMTP relay** replaces what I used to build for many years using the
@@ -30,6 +32,43 @@ authorized sending domain when missing. Managed device ranges permit
 **local-to-external delivery only**. Whether that direction requires SMTP AUTH
 is configured per device with `requireSmtpAuth`; the other three local/external
 delivery combinations remain denied. Configure device senders accordingly.
+
+### Why the sending domain needs a route
+
+The authorized sending domain is local to hMailServer so that the SMTP AUTH
+account can be provisioned under it. However, hMailServer also treats recipients
+in that domain as local. The global SendGrid SMTP relayer alone does not forward
+an unknown local recipient: without a matching route, hMailServer can reject it
+with `550 Unknown user`, even when the real address is hosted or forwarded
+elsewhere.
+
+The script also creates or updates an SMTP route for `authorizedDomain`.
+Recipients in that domain without a local hMailServer mailbox are routed through
+SendGrid rather than rejected as unknown users. This applies to both submission
+paths; it does not depend on the sender being authenticated. Existing local
+accounts remain local and may be rejected by the local-to-local delivery
+restriction. Other local domains do not automatically get this route.
+
+The route matches all addresses, treats matching senders as local and matching
+recipients as external for IP-range checks, and uses the configured SendGrid
+host and port with required STARTTLS. This classification allows the existing
+local-to-external relay rules to apply; it does not bypass the IP allowlist or
+the authentication requirement for devices configured to use SMTP AUTH.
+
+There are no separate route fields in the JSON: the route derives its domain
+from `authorizedDomain` and its target from `sendGrid.host` and
+`sendGrid.port`. Using the same values avoids configuring a route that silently
+diverges from the global relayer. The route is always configured; there is no
+independent enable/disable setting. Routes have separate authentication
+settings in hMailServer, so each apply writes the prompted SendGrid API key to
+both the route and the global SMTP relayer. The key is not stored in the JSON.
+An existing route for `authorizedDomain` is updated with these settings; review
+it before applying. New routes inherit the global
+SMTP retry settings at creation; existing route retry settings are preserved.
+Other routes are untouched, including an old route if `authorizedDomain` is
+changed; review and remove obsolete routes manually. Do not route a domain
+through SendGrid if its downstream MX or forwarding configuration would send
+the message back to this relay.
 
 The global rewrite rule changes the **From header** to `authorizedFrom` when
 that header contains `internalDomain`. This is not an envelope-sender rewrite,
@@ -148,7 +187,7 @@ device and mail-setting changes.
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `smtpHostname`                                          | Relay's FQDN, currently `smtp01.datawisetech.corp`; used for hMailServer's host identity. Not the SendGrid hostname.                                                                                |
 | `internalDomain`                                        | Domain created in hMailServer and used by the From-header rewrite condition.                                                                                                                        |
-| `authorizedDomain`                                      | Sending domain created in hMailServer; `authorizedFrom` must belong to it.                                                                                                                          |
+| `authorizedDomain`                                      | Sending domain created in hMailServer and routed to SendGrid for nonlocal recipients; `authorizedFrom` must belong to it.                                                                          |
 | `authorizedFrom`                                        | Replacement From header address.                                                                                                                                                                    |
 | `sendGrid.host` / `sendGrid.port`                       | Upstream SMTP endpoint; STARTTLS and authentication remain required by code.                                                                                                                        |
 | `tls.preferServerCipherOrder`                           | Boolean controlling the server's cipher preference; the supplied config enables it.                                                                                                                 |
@@ -434,6 +473,22 @@ sender and recipient instead of relying on script defaults:
 .\Test-SmtpRelay.ps1 -SmtpServer '127.0.0.1' `
   -From 'monitoring@datawisetech.corp' -To 'recipient@example.net'
 ```
+
+The default test uses port 25 without authentication or TLS. For authenticated
+submission, use `-Authenticate` to prompt securely for the relay SMTP account:
+
+```powershell
+.\Test-SmtpRelay.ps1 -SmtpServer 'smtp01.datawisetech.corp' -Authenticate `
+  -From 'monitoring@datawisetech.corp' -To 'recipient@example.net'
+```
+
+Alternatively, pass `-Credential $credential` with a `PSCredential` obtained
+using `Get-Credential`; supplying credentials also enables authentication.
+Authenticated tests default to port 587 and require STARTTLS with normal
+certificate validation. An explicit `-Port` overrides either default. Use a
+hostname matching the relay certificate and ensure the client trusts its
+issuer (or the demo self-signed certificate); validation is not bypassed.
+Run from a source IP allowed on the authenticated submission path.
 
 Run from the relay host for loopback, or from an allowed device/IP against the
 relay's FQDN to test the network path. Local SMTP acceptance is not final
