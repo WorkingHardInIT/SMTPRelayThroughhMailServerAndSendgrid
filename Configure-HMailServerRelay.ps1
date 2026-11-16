@@ -18,6 +18,8 @@ for this script. Older unprefixed example ranges (and currently configured devic
 names) are migrated only when their settings match this script's relay settings.
 Unrelated ranges and domains are preserved. Previously removed custom unprefixed
 ranges cannot be identified automatically and must be reviewed manually once.
+The route for authorizedDomain is created or updated to relay nonlocal
+recipients through SendGrid; other routes are left unchanged.
 The three named firewall rules are updated in place. -SkipWindowsFirewall leaves
 existing firewall rules unchanged; -KeepInternetRange leaves Internet unchanged.
 SMTP access on 'My computer' is disabled; the managed loopback relay is retained.
@@ -753,6 +755,53 @@ function Get-HMailEnumValue {
     return [Enum]::Parse($enumType, [string]$members[0])
 }
 
+function Set-HMailSendGridRoute {
+    param(
+        $Routes,
+        [string]$Domain,
+        [string]$HostName,
+        [int]$Port,
+        [string]$ApiKey,
+        $StartTlsRequired,
+        [int]$NumberOfTries,
+        [int]$MinutesBetweenTry
+    )
+
+    $route = $null
+    for ($index = 0; $index -lt $Routes.Count; $index++) {
+        $candidate = $Routes.Item($index)
+        if ($candidate.DomainName -ieq $Domain) {
+            if ($route) {
+                throw "Multiple hMailServer routes match '$Domain'; resolve the duplicates before configuring the SendGrid route."
+            }
+            $route = $candidate
+        }
+    }
+
+    if (-not $route) {
+        $route = $Routes.Add()
+        $route.DomainName = $Domain
+        $route.NumberOfTries = $NumberOfTries
+        $route.MinutesBetweenTry = $MinutesBetweenTry
+        $status = 'Added'
+    }
+    else {
+        $status = 'Updated'
+    }
+
+    $route.TargetSMTPHost = $HostName
+    $route.TargetSMTPPort = $Port
+    $route.AllAddresses = $true
+    $route.TreatSenderAsLocalDomain = $true
+    $route.TreatRecipientAsLocalDomain = $false
+    $route.ConnectionSecurity = $StartTlsRequired
+    $route.RelayerRequiresAuth = $true
+    $route.RelayerAuthUsername = 'apikey'
+    $route.SetRelayerAuthPassword($ApiKey)
+    $route.Save()
+    Write-Status -Status $status -Message "Configured SendGrid route for '$Domain' through '$HostName`:$Port' with required STARTTLS."
+}
+
 function Get-ItemByNameOrNull {
     param($Collection, [string]$Name)
 
@@ -1284,7 +1333,7 @@ $firewallUntrustedSMTP587IPv4Cidrs = @(Get-UntrustedIPv4Cidrs -AllowedRanges $au
 
 $ruleName = 'Rewrite datawisetech.corp sender for SendGrid'
 $rangeSummary = @($allIPs | ForEach-Object { "$_-$_" }) + @($networkRanges | ForEach-Object { "$($_.Name)=$($_.CIDR) ($($_.LowerIP)-$($_.UpperIP))" })
-$target = "config '$ConfigPath'; domains '$InternalDomain' and '$AuthorizedDomain'; SendGrid smarthost '$SendGridHost`:$SendGridPort'; sender '$AuthorizedFrom'; synchronize managed SMTP relay ranges $($rangeSummary -join ', '), removing obsolete managed entries and migrating legacy device names; disable original broad default ranges; global From rewrite rule '$ruleName'"
+$target = "config '$ConfigPath'; domains '$InternalDomain' and '$AuthorizedDomain'; SendGrid smarthost '$SendGridHost`:$SendGridPort'; route nonlocal '$AuthorizedDomain' recipients through SendGrid with required STARTTLS and authentication; sender '$AuthorizedFrom'; synchronize managed SMTP relay ranges $($rangeSummary -join ', '), removing obsolete managed entries and migrating legacy device names; disable original broad default ranges; global From rewrite rule '$ruleName'"
 $authenticatedNames = @($networkRanges | Where-Object { $_.RequireSMTPAuthLocalToExternal } | ForEach-Object { $_.Name })
 $target += "; SMTP authentication account '$smtpAuthenticationAddress' on port $smtpAuthenticationPort"
 $target += "; enable TLS 1.2/1.3 only and disable TLS 1.0/1.1; server cipher order: $($config.tls.preferServerCipherOrder); prioritize ChaCha20: $($config.tls.prioritizeChaCha20)"
@@ -1483,6 +1532,11 @@ try {
     $settings.SMTPRelayerUseSSL = $false
     $settings.SMTPRelayerConnectionSecurity = $startTlsRequired
     $settings.SetSMTPRelayerPassword($sendGridApiKey)
+
+    Set-HMailSendGridRoute -Routes $settings.Routes -Domain $AuthorizedDomain `
+        -HostName $SendGridHost -Port $SendGridPort -ApiKey $sendGridApiKey `
+        -StartTlsRequired $startTlsRequired -NumberOfTries $settings.SMTPNoOfTries `
+        -MinutesBetweenTry $settings.SMTPMinutesBetweenTry
 
     Sync-HMailIPRanges -Ranges $settings.SecurityRanges -DesiredRanges $desiredRanges
     Disable-HMailComputerSMTP -Ranges $settings.SecurityRanges
